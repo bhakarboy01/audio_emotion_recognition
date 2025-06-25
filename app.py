@@ -1,134 +1,79 @@
 import streamlit as st
-import librosa
 import numpy as np
-import joblib
+import librosa
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-import soundfile as sf
-import os
+import joblib
+from keras.models import load_model
+from keras.layers import Layer
 import tempfile
+import os
 
-# Set page config
-st.set_page_config(page_title="Emotion Classifier", page_icon="🎤", layout="wide")
+# ========== Custom Attention Layer ==========
+class AttentionLayer(Layer):
+    def __init__(self, **kwargs):
+        super(AttentionLayer, self).__init__(**kwargs)
 
-# Load the trained model and preprocessing objects
+    def build(self, input_shape):
+        self.W = self.add_weight(name='att_weight',
+                                 shape=(input_shape[-1], 1),
+                                 initializer='random_normal',
+                                 trainable=True)
+        self.b = self.add_weight(name='att_bias',
+                                 shape=(input_shape[1], 1),
+                                 initializer='zeros',
+                                 trainable=True)
+        super(AttentionLayer, self).build(input_shape)
+
+    def call(self, x):
+        e = tf.math.tanh(tf.matmul(x, self.W) + self.b)
+        e = tf.squeeze(e, axis=-1)
+        alpha = tf.nn.softmax(e)
+        alpha = tf.expand_dims(alpha, axis=-1)
+        context = x * alpha
+        context = tf.reduce_sum(context, axis=1)
+        return context
+
+# ========== Load Model and Tools ==========
 @st.cache_resource
-def load_artifacts():
-    model = load_model('models\emotion_model.h5')  # Replace with your actual model path
-    scaler = joblib.load('scaler.pkl')  # Replace with your actual scaler path
-    le = joblib.load('label_encoder.pkl')  # Replace with your actual label encoder path
-    return model, scaler, le
+def load_model_and_tools():
+    model = load_model("models/trained_model.h5", custom_objects={"AttentionLayer": AttentionLayer})
+    scaler = joblib.load("models/scaler.pkl")
+    label_encoder = joblib.load("models/label_encoder.pkl")
+    return model, scaler, label_encoder
 
-model, scaler, le = load_artifacts()
-
-# Emotion mapping
-emotion_map = {
-    'neutral': '😐 Neutral',
-    'calm': '😌 Calm',
-    'happy': '😊 Happy',
-    'sad': '😢 Sad',
-    'angry': '😠 Angry',
-    'fearful': '😨 Fearful',
-    'disgust': '🤢 Disgust',
-    'surprised': '😲 Surprised'
-}
-
-# Function to extract features (modified to match training preprocessing)
-def extract_features(path, max_pad_len=174):
+# ========== Feature Extraction ==========
+def extract_mfcc_feature(file_path, duration=3, offset=0.5, n_mfcc=40):
     try:
-        y, sr = librosa.load(path, sr=22050)
-        stft = np.abs(librosa.stft(y))
-
-        # Extract features
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
-        chroma = librosa.feature.chroma_stft(S=stft, sr=sr)
-        mel = librosa.feature.melspectrogram(y=y, sr=sr)
-        contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
-
-        # Pad or truncate
-        def pad_or_trunc(x, max_len):
-            if x.shape[1] < max_len:
-                return np.pad(x, ((0, 0), (0, max_len - x.shape[1])), mode='constant')
-            else:
-                return x[:, :max_len]
-
-        mfcc = pad_or_trunc(mfcc, max_pad_len)
-        chroma = pad_or_trunc(chroma, max_pad_len)
-        mel = pad_or_trunc(mel, max_pad_len)
-        contrast = pad_or_trunc(contrast, max_pad_len)
-
-        # Stack features and flatten to match training shape
-        stacked = np.vstack([mfcc, chroma, mel, contrast])
-        flattened = stacked.reshape(1, -1)  # Flatten to (1, n_features)
-        
-        return flattened
+        y, sr = librosa.load(file_path, duration=duration, offset=offset)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
+        return np.mean(mfcc.T, axis=0)
     except Exception as e:
-        st.error(f"Error processing audio: {e}")
+        st.error(f"Error processing audio file: {e}")
         return None
 
-# Streamlit app
-def main():
-    st.title("🎤 Audio Emotion Classifier")
-    st.write("Upload an audio file (WAV format recommended) and we'll predict the emotion!")
-    
-    # File uploader
-    uploaded_file = st.file_uploader("Choose an audio file", type=["wav", "mp3", "ogg"])
-    
-    if uploaded_file is not None:
-        # Save the uploaded file to a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            tmp_path = tmp_file.name
-        
-        try:
-            # Display audio player
-            st.audio(tmp_path)
-            
-            # Extract features
-            with st.spinner("Analyzing audio features..."):
-                features = extract_features(tmp_path)
-                
-                if features is not None:
-                    # Scale features (now matches training shape)
-                    X_scaled = scaler.transform(features)
-                    
-                    # Reshape for model input (1, 187, 174)
-                    X_final = X_scaled.reshape(1, 187, 174)
-                    
-                    # Make prediction
-                    prediction = model.predict(X_final)
-                    predicted_label = le.inverse_transform([np.argmax(prediction)])[0]
-                    confidence = np.max(prediction)
-                    
-                    # Display results
-                    st.success("Analysis complete!")
-                    st.subheader("Prediction Results")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Predicted Emotion", emotion_map.get(predicted_label, predicted_label))
-                    with col2:
-                        st.metric("Confidence", f"{confidence*100:.2f}%")
-                    
-                    # Display probabilities for all emotions
-                    st.subheader("Emotion Probabilities")
-                    probs = prediction[0]
-                    sorted_indices = np.argsort(probs)[::-1]
-                    
-                    for i in sorted_indices:
-                        emotion = le.inverse_transform([i])[0]
-                        prob = probs[i]
-                        st.progress(float(prob), text=f"{emotion_map.get(emotion, emotion)}: {prob*100:.2f}%")
-                    
-                    # Display the most likely emotion with an emoji
-                    st.balloons()
-                    st.success(f"The audio sounds {emotion_map.get(predicted_label, predicted_label)}!")
-        
-        except Exception as e:
-            st.error(f"An error occurred during processing: {str(e)}")
-        finally:
-            # Clean up temporary file
-            os.unlink(tmp_path)
+# ========== Streamlit UI ==========
+st.set_page_config(page_title="Audio Emotion Recognition", layout="centered")
+st.title("🎙️ Audio Emotion Recognition")
+st.write("Upload a `.wav` file and get the predicted emotion.")
 
-if __name__ == "__main__":
-    main()
+uploaded_file = st.file_uploader("Upload a .wav file", type=["wav"])
+
+if uploaded_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        tmp_path = tmp_file.name
+
+    # Extract features
+    features = extract_mfcc_feature(tmp_path)
+    if features is not None:
+        model, scaler, label_encoder = load_model_and_tools()
+
+        X_input = scaler.transform([features]).reshape(-1, 40, 1)
+        y_pred_probs = model.predict(X_input)
+        y_pred_class = np.argmax(y_pred_probs, axis=1)
+        predicted_label = label_encoder.inverse_transform(y_pred_class)[0]
+
+        st.success(f"🧠 Predicted Emotion: **{predicted_label.capitalize()}**")
+        st.bar_chart(y_pred_probs[0])
+
+    os.remove(tmp_path)
