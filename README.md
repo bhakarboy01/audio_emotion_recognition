@@ -51,11 +51,11 @@ python test_model.py
 
 ## Confusion Matrix
 
-![Confusion Matrix](images\Confusion_Matrix.png)
+![Confusion Matrix](images/Confusion_Matrix.png)
 
 ## Classification Report
 
-![Classification Report](images\Classification_report.png)
+![Classification Report](images/Classification_report.png)
 
 ---
 
