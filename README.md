@@ -57,6 +57,10 @@ python test_model.py
 
 ![Classification Report](images/Classification_report.png)
 
+## Attention BiLSTM Architecture
+
+![BiLSTM Architecture](images/Model_architecture.png)
+
 ---
 
 ## 🌐 Streamlit App
